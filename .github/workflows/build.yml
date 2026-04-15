@@ -1,8 +1,6 @@
-name: Build WebDriverAgent IPA
+name: Build WDA for AltStore
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -18,52 +16,42 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Appium and Device Farm Plugin
+      - name: Install Appium & xcuitest-driver
         run: |
           npm install -g appium
           appium driver install xcuitest
-          appium plugin install --source=npm appium-device-farm
 
-      - name: Install Apple Certificate & Provisioning Profile
-        env:
-          P12_BASE64: ${{ secrets.P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          PROV_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+      - name: Build Unsigned WDA
         run: |
-          # 建立臨時鑰匙圈
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 21)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # 匯入憑證
-          echo $P12_BASE64 | base64 --decode > certificate.p12
-          security import certificate.p12 -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          # 配置 Provisioning Profile (適用於 Xcode 16+)
-          PP_DEST="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-          mkdir -p "$PP_DEST"
-          PP_FILE="$PP_DEST/build_profile.mobileprovision"
-          echo $PROV_PROFILE_BASE64 | base64 --decode > "$PP_FILE"
+          # 自動定位 xcuitest-driver 內部的 WDA 路徑
+          WDA_PATH=$(dirname $(find $(npm root -g) -name "WebDriverAgent.xcodeproj"))
+          echo "WDA Path Found: $WDA_PATH"
+          cd "$WDA_PATH"
           
-          echo "Profiles installed to: $PP_DEST"
+          # 核心改動：強制停用 Code Signing
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGNING_IDENTITY=""
 
-      - name: Build WDA IPA
-        run: |
-          # 執行 device-farm 的編譯指令
-          # 此處假設你使用預設路徑，若有自定義 WDA 路徑請加上 --wda-project-path
-          appium plugin run device-farm prepare-wda
-        env:
-          WDA_PROJECT_PATH: "./WebDriverAgent"
-          # 如果需要，可以在這裡強制指定 WDA 專案路徑
-          # WDA_PROJECT_PATH: "./WebDriverAgent" 
+          # 準備 Payload 資料夾以封裝 IPA
+          mkdir -p $GITHUB_WORKSPACE/output/Payload
+          
+          # 尋找編譯出的 .app 檔案路徑
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "WebDriverAgentRunner-Runner.app" -type d | head -n 1)
+          echo "App found at: $APP_PATH"
+          
+          # 複製到 Payload 並壓縮
+          cp -R "$APP_PATH" $GITHUB_WORKSPACE/output/Payload/
+          cd $GITHUB_WORKSPACE/output
+          zip -r WebDriverAgent.ipa Payload
 
-      - name: Upload WDA IPA
+      - name: Upload to GitHub
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-IPA
-          path: |
-            **/build/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.ipa
-            **/WebDriverAgent.ipa
+          name: WDA-for-AltStore
+          path: output/WebDriverAgent.ipa
