@@ -1,0 +1,69 @@
+name: Build WebDriverAgent IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Appium and Device Farm Plugin
+        run: |
+          npm install -g appium
+          appium driver install xcuitest
+          appium plugin install --source=npm appium-device-farm
+
+      - name: Install Apple Certificate & Provisioning Profile
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          PROV_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          # 建立臨時鑰匙圈
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 21)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # 匯入憑證
+          echo $P12_BASE64 | base64 --decode > certificate.p12
+          security import certificate.p12 -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # 配置 Provisioning Profile (適用於 Xcode 16+)
+          PP_DEST="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          mkdir -p "$PP_DEST"
+          PP_FILE="$PP_DEST/build_profile.mobileprovision"
+          echo $PROV_PROFILE_BASE64 | base64 --decode > "$PP_FILE"
+          
+          echo "Profiles installed to: $PP_DEST"
+
+      - name: Build WDA IPA
+        run: |
+          # 執行 device-farm 的編譯指令
+          # 此處假設你使用預設路徑，若有自定義 WDA 路徑請加上 --wda-project-path
+          appium plugin run device-farm prepare-wda
+        env:
+          WDA_PROJECT_PATH: "./WebDriverAgent"
+          # 如果需要，可以在這裡強制指定 WDA 專案路徑
+          # WDA_PROJECT_PATH: "./WebDriverAgent" 
+
+      - name: Upload WDA IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-IPA
+          path: |
+            **/build/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.ipa
+            **/WebDriverAgent.ipa
